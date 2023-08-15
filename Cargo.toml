@@ -5,7 +5,9 @@ edition = "2021"
 description = "Used to create compressed iso images for Project Stellar"
 repository = "https://github.com/tankbusta/xcso-rust"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[[bin]]
+name = "make-xcso"
+path = "src/main.rs"
 
 [dependencies]
 indicatif = "0.17.6"

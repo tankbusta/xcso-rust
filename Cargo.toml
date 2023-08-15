@@ -1,0 +1,13 @@
+[package]
+name = "xcso"
+version = "0.1.0"
+edition = "2021"
+description = "Used to create compressed iso images for Project Stellar"
+repository = "https://github.com/tankbusta/xcso-rust"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+indicatif = "0.17.6"
+console = { version = "0.15.7", default-features = false, features = ["ansi-parsing"] }
+minilz4 = "^0.6"

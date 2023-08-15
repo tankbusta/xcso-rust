@@ -6,7 +6,6 @@ use std::ffi::OsString;
 use std::io::{Read, Seek};
 use std::path::Path;
 
-use byteorder::{WriteBytesExt, LittleEndian};
 use console::{style, Emoji};
 use indicatif::ProgressBar;
 use minilz4::EncoderBuilder;
@@ -14,6 +13,9 @@ use minilz4::EncoderBuilder;
 static CISO_MAGIC: u32 = 0x4F534943; // CISO
 static CISO_HEADER_SIZE: u32 = 0x18; // 24
 static CISO_BLOCK_SIZE: usize = 0x800; // 2048
+static XBOX_MEDIA_HEADER_REDUMP_OFFSET: io::SeekFrom = io::SeekFrom::Start(0x18310000);
+static XBOX_MEDIA_HEADER_XDVDFS_OFFSET: io::SeekFrom = io::SeekFrom::Start(0x10000);
+static FATX_MAX_SIZE: u64 = 4290732032;
 
 static CLIP: Emoji<'_, '_> = Emoji("🔗  ", "");
 
@@ -55,7 +57,7 @@ fn get_image_offset(f: &mut File) -> Result<u32, io::Error> {
     let xbox_media_header: Vec<u8> = b"MICROSOFT*XBOX*MEDIA".to_vec();
 
     // Check for redump
-    _ = f.seek(io::SeekFrom::Start(0x18310000));
+    _ = f.seek(XBOX_MEDIA_HEADER_REDUMP_OFFSET);
     _ = f.read_exact(&mut buf);
 
     if xbox_media_header == buf {
@@ -63,7 +65,7 @@ fn get_image_offset(f: &mut File) -> Result<u32, io::Error> {
     }
 
     // Check for XDVDFS
-    _ = f.seek(io::SeekFrom::Start(0x10000));
+    _ = f.seek(XBOX_MEDIA_HEADER_XDVDFS_OFFSET);
     _ = f.read_exact(&mut buf);
     if xbox_media_header == buf {
         return Ok(0x0);
@@ -108,8 +110,8 @@ fn write_cso_info(f: &mut File, img_data: CsoImage) -> Result<(), Error> {
     let block_size = CISO_BLOCK_SIZE as u32;
     buf.write(&block_size.to_le_bytes())?;
 
-    buf.write_u8(img_data.version)?;
-    buf.write_u8(img_data.align)?;
+    buf.write(&img_data.version.to_le_bytes())?;
+    buf.write(&img_data.align.to_le_bytes())?;
 
     let pad: u16 = 0;
     buf.write(&pad.to_le_bytes())?;
@@ -120,10 +122,7 @@ fn write_cso_info(f: &mut File, img_data: CsoImage) -> Result<(), Error> {
 
 fn write_block_index(f: &mut File, blocks: &Vec<u32>) -> Result<u64, Error> {
     for block in blocks.iter() {
-        match f.write_u32::<LittleEndian>(*block) {
-            Ok(_) => (),
-            Err(e) => return Err(e),
-        }
+        f.write(&block.to_le_bytes())?;
     }
 
     // Get the current position
@@ -163,12 +162,13 @@ fn compress_iso(fp: &String) -> Result<String, io::Error> {
     // TODO: Split files
     let dest_fp = fp.to_owned() + ".1.cso";
     let mut dest_f1: File = File::create(dest_fp.clone())?;
+    let mut dest_f2: Option<File> = None;
 
     // Write the CSO header
     write_cso_info(&mut dest_f1, image_details)?;
     
     // Followed by a placeholder block index
-    let block_size = usize::try_from(image_details.total_blocks).unwrap();
+    let block_size = image_details.total_blocks;
     let mut block_index = vec![0; block_size+1];
     let mut write_pos = write_block_index(&mut dest_f1, &block_index)?;
 
@@ -182,15 +182,22 @@ fn compress_iso(fp: &String) -> Result<String, io::Error> {
 
     for block in 0..image_details.total_blocks {
         // Check if we need to split the ISO (due to FATX limitations)
-        // TODO: Determine a better value for this.
-        if write_pos > 0xFFBF6000 {
-            panic!("TODO: Split support")
+        if write_pos > FATX_MAX_SIZE {
+            let dest_fp = fp.to_owned() + ".2.cso";
+            let cso2 = File::create(dest_fp)?;
+
+            dest_f2 = Some(cso2);
+            write_pos = 0;
         }
 
         let mut align: usize = write_pos as usize & align_m as usize;
         if align > 0 {
             align = align_b - align;
-            dest_f1.write_all(&alignment_buffer[..align])?;
+            match dest_f2 {
+                Some(ref mut fh) => fh.write_all(&alignment_buffer[..align])?,
+                None => dest_f1.write_all(&alignment_buffer[..align])?,
+            }
+
             write_pos += align as u64;
         }
 
@@ -201,11 +208,17 @@ fn compress_iso(fp: &String) -> Result<String, io::Error> {
         // If the compressed size is greater than the original, prefer the original
         if compressed.len() + 12 >= read {
             write_pos += read as u64;
-            dest_f1.write(&blockbuf[..read])?;
+            match dest_f2 {
+                Some(ref mut fh) => fh.write_all(&blockbuf[..read])?,
+                None => dest_f1.write_all(&blockbuf[..read])?,
+            }
         } else {
             block_index[block] |= 0x80000000;
             write_pos += compressed.len() as u64;
-            dest_f1.write(&compressed)?;      
+            match dest_f2 {
+                Some(ref mut fh) => fh.write_all(&compressed)?,
+                None => dest_f1.write_all(&compressed)?,
+            }   
         }
 
         pb.inc(1);
@@ -222,6 +235,11 @@ fn compress_iso(fp: &String) -> Result<String, io::Error> {
     write_block_index(&mut dest_f1, &block_index)?;
 
     pad_file(&mut dest_f1)?;
+
+    if dest_f2.is_some() {
+        pad_file(&mut dest_f2.unwrap())?;
+    }
+
     pb.finish_and_clear();
 
     return Ok(dest_fp);
@@ -234,11 +252,12 @@ fn main() {
         return;
     }
 
-    for (i, fname) in args.iter().skip(1).enumerate() {
-        if !is_iso(fname) {
-            continue;
-        }
-        
+    let iter = args.iter().
+        skip(1).
+        filter(|x| is_iso(x)).
+        enumerate();
+
+    for (i, fname) in iter {        
         let fancy_file: String = format!("[{}/{}]", i+1, args.len()-1);
         println!(
             "{} {}Converting image {}...",

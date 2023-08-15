@@ -136,17 +136,19 @@ fn compress_block_v2(block: Vec<u8>) -> Result<Vec<u8>, Error> {
         auto_flush(true).
         checksum(minilz4::ContentChecksum::NoChecksum).
         block_mode(minilz4::BlockMode::Independent).
+        block_size(minilz4::BlockSize::Max64KB).
         level(16).
-        build(Vec::new()).unwrap();
+        build(Vec::new())?;
     {
         std::io::Write::write_all(&mut encoder, &block)?;
     }
 
     let result = encoder.finish()?;
-    // TODO: Investigate why there's (likely) a checksum and the size header
-    // despite turning checksum mode off
-    return Ok(result[11..].to_vec());
-    // return Ok(result);
+    // Trim the header and some of the footer off
+
+    // TODO: This is a gigantic hack but it saves a lot of time as there's no low-level lz4 libraries
+    // and we'd have to modify
+    return Ok(result[7..result.len()-4].to_vec());
 }
 
 fn compress_iso(fp: &String) -> Result<String, io::Error> {

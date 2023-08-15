@@ -5,6 +5,9 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
 env:
   GITHUB_TOKEN: ${{ github.token }}
   RUST_BACKTRACE: 1
@@ -109,6 +112,7 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v1
         with:
-          draft: true
-          files: "make-xcso-*"
-          body_path: Changes.md
+          generate_release_notes: true
+          files: |
+            make-xcso-*
+            LICENSE
